@@ -1,40 +1,57 @@
 package com.example.myrtspplayer;
 
 import android.Manifest;
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.provider.MediaStore;
+import android.util.Log;
 import android.view.ViewGroup;
+import android.widget.LinearLayout;
 import android.widget.Toast;
-import android.view.View;
-import android.widget.Button;
-
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+
 import com.example.myrtspplayer.databinding.ActivityMainBinding;
-import androidx.constraintlayout.widget.ConstraintLayout;
 
 import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
+import org.videolan.libvlc.interfaces.IMedia;
 
 import java.io.File;
-import java.io.IOException;
-import android.content.pm.ActivityInfo;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 
 
 public class MainActivity extends AppCompatActivity {
     private LibVLC libVLC;
-    private MediaPlayer mediaPlayer;
+    private MediaPlayer displayMediaPlayer;
+    private MediaPlayer recordMediaPlayer;
     private boolean isRecording = false;
     private boolean isFullScreen = false;
     private ActivityMainBinding binding;
     private ConstraintLayout.LayoutParams defaultVideoViewParams;
-    private float currentScale = 1.0f; // Define currentScale
-    private final float scaleIncrement = 0.1f; // Define scaleIncrement
+    private File createdVideo;
+
+    private float currentScale = PORTRAIT_DEFAULT_SCALE; // Define currentScale
+    private float minimumScale = PORTRAIT_DEFAULT_SCALE; // Define currentScale
+
+    private static final float SCALE_INCREMENT = 0.1f; // Define scaleIncrement
+    private static final float PORTRAIT_DEFAULT_SCALE = .6f;
+    private static final float FULL_SCREEN_DEFAULT_SCALE = .75f;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -48,25 +65,40 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void checkAndRequestPermissions() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 101);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) != PackageManager.PERMISSION_GRANTED) {
+
+                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.READ_MEDIA_VIDEO}, 101);
+            }
+        } else {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 101);
+            }
         }
     }
 
     private void initializePlayer() {
         libVLC = new LibVLC(this);
+        defaultVideoViewParams = (ConstraintLayout.LayoutParams) binding.contentMain.videoView.getLayoutParams();
+        setupVideoView();
+        setupUIInteractions();
+    }
+
+    private IMedia setupMedia() {
         String url = getString(R.string.rtspUrl);
         Media media = new Media(libVLC, Uri.parse(url));
         media.addOption("--aout=opensles");
         media.addOption("--audio-time-stretch");
         media.addOption("-vvv"); // verbosity
 
-        mediaPlayer = new MediaPlayer(libVLC);
-        mediaPlayer.setMedia(media);
+        return media;
+    }
 
-        defaultVideoViewParams = (ConstraintLayout.LayoutParams) binding.contentMain.videoView.getLayoutParams();
-        setupVideoView();
-        setupUIInteractions();
+    private void addMediaRecordOptions(IMedia media) {
+        if (createdVideo != null) {
+            media.addOption(":sout=#duplicate{dst=display,dst=std{access=file,mux=ps,dst=" + createdVideo.getAbsolutePath() + "}");
+            media.addOption(":sout-keep");
+        }
     }
 
     private void setupUIInteractions() {
@@ -77,10 +109,20 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupVideoView() {
-        mediaPlayer.getVLCVout().setWindowSize(binding.contentMain.videoView.getWidth(), binding.contentMain.videoView.getHeight());
-        mediaPlayer.getVLCVout().setVideoSurface(binding.contentMain.videoView.getHolder().getSurface(), binding.contentMain.videoView.getHolder());
-        mediaPlayer.getVLCVout().attachViews();
-        mediaPlayer.play();
+        displayMediaPlayer = new MediaPlayer(libVLC);
+        displayMediaPlayer.setMedia(setupMedia());
+        updateVideoWindowSize();
+        displayMediaPlayer.getVLCVout().setVideoSurface(binding.contentMain.videoView.getHolder().getSurface(), binding.contentMain.videoView.getHolder());
+        displayMediaPlayer.getVLCVout().attachViews();
+        displayMediaPlayer.play();
+    }
+
+    private void updateVideoWindowSize() {
+        minimumScale = isFullScreen ? FULL_SCREEN_DEFAULT_SCALE : PORTRAIT_DEFAULT_SCALE;
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            displayMediaPlayer.getVLCVout().setWindowSize(binding.contentMain.videoView.getWidth(), binding.contentMain.videoView.getHeight());
+            displayMediaPlayer.setScale(minimumScale);
+        }, 300);
     }
 
     private void toggleFullScreen() {
@@ -89,76 +131,30 @@ public class MainActivity extends AppCompatActivity {
             // Change to landscape mode
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
             binding.contentMain.videoView.setLayoutParams(new ConstraintLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            updateVideoWindowSize();
 
-            // Update layout constraints for buttons for landscape mode
-            updateButtonLayoutForLandscape(
-                    binding.contentMain.zoomInButton,
-                    binding.contentMain.zoomOutButton,
-                    binding.contentMain.recordButton
-            );
-
-            // Make buttons visible
-            binding.contentMain.zoomInButton.setVisibility(View.VISIBLE);
-            binding.contentMain.zoomOutButton.setVisibility(View.VISIBLE);
-            binding.contentMain.recordButton.setVisibility(View.VISIBLE);
         } else {
             // Change back to the original orientation
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
             binding.contentMain.videoView.setLayoutParams(defaultVideoViewParams);
 
-            // Reset layout constraints for zoom buttons for portrait mode
-            resetZoomButtonLayout(binding.contentMain.zoomInButton, binding.contentMain.videoView.getId());
-            resetZoomButtonLayout(binding.contentMain.zoomOutButton, binding.contentMain.zoomInButton.getId());
-
-            // Hide zoom buttons or reset their layout
-            binding.contentMain.zoomInButton.setVisibility(View.GONE);
-            binding.contentMain.zoomOutButton.setVisibility(View.GONE);
+            updateVideoWindowSize();
+            displayMediaPlayer.setScale(.5f);
         }
+
+        // Update layout constraints for buttons for landscape mode
+        updateButtonLayout();
         binding.contentMain.fullScreenButton.setText(isFullScreen ? "Exit Full Screen" : "Full Screen");
     }
 
-    private void updateButtonLayoutForLandscape(Button zoomInButton, Button zoomOutButton, Button recordButton) {
+    private void updateButtonLayout() {
         // Set the constraints for the Zoom In Button
-        ConstraintLayout.LayoutParams zoomInParams = (ConstraintLayout.LayoutParams) zoomInButton.getLayoutParams();
-        zoomInParams.rightToRight = ConstraintLayout.LayoutParams.PARENT_ID;
-        zoomInParams.topToTop = ConstraintLayout.LayoutParams.PARENT_ID;
-        zoomInParams.bottomToTop = zoomOutButton.getId();
-        zoomInParams.verticalBias = 0.5f; // Adjust this value as needed
-        zoomInParams.setMargins(0, 0, 16, 0); // Right margin to push it from the right edge
-        zoomInButton.setLayoutParams(zoomInParams);
-
-        // Set the constraints for the Zoom Out Button
-        ConstraintLayout.LayoutParams zoomOutParams = (ConstraintLayout.LayoutParams) zoomOutButton.getLayoutParams();
-        zoomOutParams.rightToRight = ConstraintLayout.LayoutParams.PARENT_ID;
-        zoomOutParams.topToBottom = zoomInButton.getId();
-        zoomOutParams.bottomToTop = recordButton.getId();
-        zoomOutParams.verticalBias = 0.5f; // Adjust this value as needed
-        zoomOutParams.setMargins(0, 0, 16, 0); // Right margin to push it from the right edge
-        zoomOutButton.setLayoutParams(zoomOutParams);
-
-        // Set the constraints for the Record Button
-        ConstraintLayout.LayoutParams recordParams = (ConstraintLayout.LayoutParams) recordButton.getLayoutParams();
-        recordParams.rightToRight = ConstraintLayout.LayoutParams.PARENT_ID;
-        recordParams.topToBottom = zoomOutButton.getId();
-        recordParams.bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID;
-        recordParams.verticalBias = 0.5f; // Adjust this value as needed
-        recordParams.setMargins(0, 0, 16, 0); // Right margin to push it from the right edge
-        recordButton.setLayoutParams(recordParams);
+        LinearLayout container = binding.contentMain.buttonsContainer;
+        ConstraintLayout.LayoutParams containerParams = (ConstraintLayout.LayoutParams) container.getLayoutParams();
+        containerParams.endToEnd = ConstraintLayout.LayoutParams.PARENT_ID;
+        containerParams.topToTop = ConstraintLayout.LayoutParams.PARENT_ID;
+        container.setLayoutParams(containerParams);
     }
-
-
-
-    private void resetZoomButtonLayout(Button button, int startToStartOf) {
-        ConstraintLayout.LayoutParams layoutParams = (ConstraintLayout.LayoutParams) button.getLayoutParams();
-        layoutParams.startToStart = startToStartOf;
-        layoutParams.endToEnd = ConstraintLayout.LayoutParams.UNSET;
-        layoutParams.topToTop = ConstraintLayout.LayoutParams.UNSET;
-        layoutParams.bottomToBottom = binding.contentMain.videoView.getId();
-        layoutParams.setMargins(16, 16, 0, 0);
-        button.setLayoutParams(layoutParams);
-    }
-
-
 
     private void toggleRecording() {
         if (!isRecording) {
@@ -169,55 +165,115 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startRecording() {
-        if (mediaPlayer != null && mediaPlayer.getMedia() != null) {
-            try {
-                String filename = "recorded_video.mp4";
-                File storageDir = getExternalFilesDir(null);
-                File videoFile = new File(storageDir, filename);
+        try {
+            // Start recording
+            String fileName = System.currentTimeMillis() + "_recorded_video.mp4";
+            File filesDir = getFilesDir();
+            createdVideo = new File(filesDir, fileName);
+            isRecording = true;
 
-                // Start recording
-                mediaPlayer.getMedia().addOption(":sout=#transcode{vcodec=h264,acodec=mpga,vb=800,ab=128,deinterlace}:file{dst=" + videoFile.getAbsolutePath() + "}");
-                mediaPlayer.getMedia().addOption(":sout-keep");
+            recordMediaPlayer = new MediaPlayer(libVLC);
+            IMedia media = setupMedia();
+            addMediaRecordOptions(media);
+            recordMediaPlayer.setMedia(media);
 
-                mediaPlayer.play(); // Restart the playback to record the stream
-                isRecording = true;
-                binding.contentMain.recordButton.setText("Stop Recording");
-                Toast.makeText(this, "Recording started", Toast.LENGTH_SHORT).show();
-            } catch (Exception e) {
-                e.printStackTrace();
-                Toast.makeText(this, "Recording failed", Toast.LENGTH_SHORT).show();
-            }
+            // Restart the playback to record the stream
+            recordMediaPlayer.play();
+            binding.contentMain.recordButton.setText("Stop Recording");
+            Toast.makeText(this, "Recording started", Toast.LENGTH_SHORT).show();
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            isRecording = false;
+            Toast.makeText(this, "Recording failed", Toast.LENGTH_SHORT).show();
         }
     }
 
     private void stopRecording() {
-        if (isRecording) {
-            mediaPlayer.getMedia().addOption(":sout");
-            mediaPlayer.stop(); // Stop playback to stop recording the stream
+        if (isRecording && recordMediaPlayer != null && recordMediaPlayer.getMedia() != null) {
+            recordMediaPlayer.stop();
+            recordMediaPlayer.release();
+
+            saveRecordingToGallery();
+
+            if (!createdVideo.delete()) {
+                Log.e("Video recording", "Failed to delete temporary file");
+            }
+
             isRecording = false;
             binding.contentMain.recordButton.setText("Record");
             Toast.makeText(this, "Recording stopped", Toast.LENGTH_SHORT).show();
         }
     }
 
+    private void saveRecordingToGallery() {
+        ContentResolver resolver = getContentResolver();
+        ContentValues valuesVideo = new ContentValues();
+        valuesVideo.put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/" + getString(R.string.app_name));
+        valuesVideo.put(MediaStore.Video.Media.TITLE, createdVideo.getName());
+        valuesVideo.put(MediaStore.Video.Media.DISPLAY_NAME, createdVideo.getName());
+        valuesVideo.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
+
+        Uri uriSavedVideo;
+        if (Build.VERSION.SDK_INT >= 29) {
+            Uri collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+            uriSavedVideo = resolver.insert(collection, valuesVideo);
+            valuesVideo.put(MediaStore.Video.Media.DATE_TAKEN, System.currentTimeMillis());
+            valuesVideo.put(MediaStore.Video.Media.IS_PENDING, 1);
+        } else {
+            valuesVideo.put(MediaStore.Video.Media.DATA, createdVideo.getAbsolutePath());
+            uriSavedVideo = getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, valuesVideo);
+        }
+        if (uriSavedVideo != null) {
+            ParcelFileDescriptor pfd;
+            try {
+                pfd = getContentResolver().openFileDescriptor(uriSavedVideo, "w");
+                FileOutputStream out = null;
+                if (pfd != null) {
+                    out = new FileOutputStream(pfd.getFileDescriptor());
+                }
+                FileInputStream in = new FileInputStream(createdVideo);
+
+                byte[] buf = new byte[8192];
+                int len;
+                if (out != null) {
+                    while ((len = in.read(buf)) > 0) {
+                        out.write(buf, 0, len);
+                    }
+                    out.close();
+                    in.close();
+                    pfd.close();
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+            if (Build.VERSION.SDK_INT >= 29) {
+                valuesVideo.clear();
+                valuesVideo.put(MediaStore.Video.Media.IS_PENDING, 0);
+                getContentResolver().update(uriSavedVideo, valuesVideo, null, null);
+            }
+        }
+    }
+
     private void zoomIn() {
-        currentScale += scaleIncrement;
-        mediaPlayer.setScale(currentScale);
+        currentScale += SCALE_INCREMENT;
+        displayMediaPlayer.setScale(currentScale);
     }
 
     private void zoomOut() {
-        if (currentScale - scaleIncrement >= 1.0f) {
-            currentScale -= scaleIncrement;
-            mediaPlayer.setScale(currentScale);
+        if (currentScale - SCALE_INCREMENT >= minimumScale) {
+            currentScale -= SCALE_INCREMENT;
+            displayMediaPlayer.setScale(currentScale);
         }
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (mediaPlayer != null) {
-            mediaPlayer.stop();
-            mediaPlayer.release();
+        if (displayMediaPlayer != null) {
+            displayMediaPlayer.stop();
+            displayMediaPlayer.release();
         }
         if (libVLC != null) {
             libVLC.release();
